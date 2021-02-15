@@ -1,5 +1,7 @@
 from typing import List, Dict
 import sqlalchemy
+from sqlalchemy import func
+from sqlalchemy import and_
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import logging
@@ -31,7 +33,7 @@ class RawData(Base):
   power = sqlalchemy.Column(sqlalchemy.Integer)
 
   def __repr__(self):
-    return f'<raw_data(time={self.time}, id={self.id}, channel={self.channel}, power={self.power}>'
+    return f'<raw_data(time={self.time}, id={self.id}, power={self.power}>'
 
 
 class EMonitorDB:
@@ -71,3 +73,45 @@ class EMonitorDB:
       self.session_.merge (db_row)
     self.session_.commit ()
     self.logger_.info(f'Updated emonitor.meta_data')
+
+class EMonitorDBReader:
+  def __init__(self):
+    self.logger_ = logging.getLogger('main')
+    self.host_ = "localhost"
+    self.engine_ = sqlalchemy.create_engine(
+      'mysql+mysqlconnector://writer:writer@localhost:3306/emonitor',
+      echo=True)
+    Base.metadata.create_all(self.engine_)
+
+    Session = sqlalchemy.orm.sessionmaker()
+    Session.configure(bind=self.engine_)
+    self.session_ = Session()
+    self.meta_data_={}
+    self._load_meta()
+
+  def _load_meta(self):
+    for row in self.session_.query(MetaData).all():
+      self.meta_data_ [row.id]={'id': row.id,
+                                'input': row.input,
+                                'name': row.name,
+                                'paired': row.paired,
+                                'rating': row.rating,
+                                'voltage': row.voltage,
+                                }
+
+  def load_latest(self):
+    max_query=self.session_.query(RawData.id,func.max(RawData.time).label('max_timestamp')).group_by (RawData.id).subquery()
+    query2=self.session_.query(RawData).join(max_query, and_(RawData.id == max_query.c.id, RawData.time == max_query.c.max_timestamp))
+    #query3=self.session_.query(query2.c.id, query2.c.power,MetaData).filter(query2.c.id == MetaData.id)
+
+    ret_val=[]
+    for row in query2.all ():
+      id=row.id
+      power=row.power
+      time=row.time
+      ret_dict=self.meta_data_.get (id,{})
+      ret_dict ['power']=power
+      ret_dict ['time']=time
+      ret_val.append(ret_dict)
+    return ret_val
+
