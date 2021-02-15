@@ -2,6 +2,7 @@ from typing import List, Dict
 import sqlalchemy
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
+import logging
 
 Base = declarative_base()
 
@@ -35,10 +36,11 @@ class RawData(Base):
 
 class EMonitorDB:
   def __init__(self):
+    self.logger_ = logging.getLogger('main')
     self.host_ = "localhost"
     self.engine_ = sqlalchemy.create_engine(
       'mysql+mysqlconnector://writer:writer@localhost:3306/emonitor',
-      echo=True)
+      echo=False)
     Base.metadata.create_all(self.engine_)
 
     Session = sqlalchemy.orm.sessionmaker()
@@ -54,6 +56,7 @@ class EMonitorDB:
       db_row = RawData(time=now, id=id, power=power)
       self.session_.add (db_row)
     self.session_.commit ()
+    self.logger_.debug (f'Written {len(values)} rows to emonitor.raw_data')
 
   def store_meta(self, values: List[Dict[str,str]]):
     for row in values:
@@ -67,3 +70,4 @@ class EMonitorDB:
       db_row = MetaData(id=id, name=name, input=input, rating=rating, voltage=voltage, paired=paired )
       self.session_.merge (db_row)
     self.session_.commit ()
+    self.logger_.info(f'Updated emonitor.meta_data')
