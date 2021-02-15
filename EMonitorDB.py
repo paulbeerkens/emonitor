@@ -39,7 +39,6 @@ class RawData(Base):
 class EMonitorDB:
   def __init__(self):
     self.logger_ = logging.getLogger('main')
-    self.host_ = "localhost"
     self.engine_ = sqlalchemy.create_engine(
       'mysql+mysqlconnector://writer:writer@localhost:3306/emonitor',
       echo=False)
@@ -77,19 +76,19 @@ class EMonitorDB:
 class EMonitorDBReader:
   def __init__(self):
     self.logger_ = logging.getLogger('main')
-    self.host_ = "localhost"
     self.engine_ = sqlalchemy.create_engine(
-      'mysql+mysqlconnector://writer:writer@localhost:3306/emonitor',
+      'mysql+mysqlconnector://reader:reader@localhost:3306/emonitor',
       echo=True)
     Base.metadata.create_all(self.engine_)
 
     Session = sqlalchemy.orm.sessionmaker()
     Session.configure(bind=self.engine_)
-    self.session_ = Session()
+    self.session_=Session()
     self.meta_data_={}
     self._load_meta()
 
   def _load_meta(self):
+    self.session_.commit()
     for row in self.session_.query(MetaData).all():
       self.meta_data_ [row.id]={'id': row.id,
                                 'input': row.input,
@@ -100,6 +99,9 @@ class EMonitorDBReader:
                                 }
 
   def load_latest(self):
+    #https://docs.sqlalchemy.org/en/14/faq/sessions.html#i-m-re-loading-data-with-my-session-but-it-isn-t-seeing-changes-that-i-committed-elsewhere
+    self.session_.commit()
+
     max_query=self.session_.query(RawData.id,func.max(RawData.time).label('max_timestamp')).group_by (RawData.id).subquery()
     query2=self.session_.query(RawData).join(max_query, and_(RawData.id == max_query.c.id, RawData.time == max_query.c.max_timestamp))
     #query3=self.session_.query(query2.c.id, query2.c.power,MetaData).filter(query2.c.id == MetaData.id)
