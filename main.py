@@ -37,7 +37,7 @@ class EMonitor:
     while True:
       values = await self.page.get()
       self.db_.store(values)
-      next+=timedelta(seconds=5)
+      next+=timedelta(seconds=10)
       await asyncio.sleep((next - datetime.now()).total_seconds())
 
   async def update_meta(self):
