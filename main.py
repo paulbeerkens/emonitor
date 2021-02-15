@@ -1,12 +1,13 @@
 import asyncio
-import aiohttp
 
 from EMonitorWebPage import EMonitorWebPage
+from EMonitorDB import EMonitorDB
 
 class EMonitor:
     def __init__(self):
         self.name_ = "Test"
-        self.page = EMonitorWebPage()
+        self.page = EMonitorWebPage('external')
+        self.db_ = EMonitorDB ()
 
     async def run(self):
         while True:
