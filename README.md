@@ -12,7 +12,7 @@ feed, averages those samples into hourly prices, and upserts them into the
 `comed_hourly_prices` SQLite table. It refreshes the previous day as well as the
 current day so preliminary prices can be updated.
 
-## Setup (Python 3.14)
+## Setup (Python 3.13)
 
 ```bash
 ./env/install.sh
@@ -32,6 +32,30 @@ No database server is required.
 
 Then open <http://127.0.0.1:5000>. In VS Code, select either EMonitor launch
 configuration or the compound configuration to run both processes.
+
+## Run automatically with systemd
+
+On a production Linux machine such as a Raspberry Pi, finish the setup above,
+then install the collector as a system service:
+
+```bash
+sudo ./deployment/install-service.sh
+```
+
+The installer uses the account that invoked `sudo`, inserts that account and
+the current project directory into the service template, enables the collector
+at boot, and starts it immediately. Re-run the command after changing the
+template or moving the project.
+
+```bash
+systemctl status emonitor
+journalctl -u emonitor -f
+sudo systemctl restart emonitor
+sudo systemctl stop emonitor
+```
+
+Do not install the service on a development machine where you only want short
+manual or Visual Studio Code runs.
 
 The defaults poll every 15 seconds and finish UTC periods at `:00` and `:30`. Energy
 between polls is calculated as elapsed time multiplied by the previous sampled
