@@ -1,27 +1,31 @@
-from flask import Flask,render_template,Response
-from EMonitorDB import EMonitorDBReader
-from datetime import datetime
+import os
 
-db=EMonitorDBReader()
+from flask import Flask, render_template
+from dotenv import load_dotenv
 
-db.load_latest()
+from EMonitorDB import EMonitorDB
 
-app=Flask(__name__)
+load_dotenv()
 
-@app.route('/')
-def current():
-  current_power=db.load_latest()
-  rows=[]
-  max_time=None
-  for circuit in current_power:
-    row_vals={}
-    row_vals['id']=circuit.get('id',0)
-    row_vals['name']=circuit.get('name','NA')
-    row_vals['power']=circuit.get('power',0)
-    if max_time is None or circuit['time']>max_time:
-      max_time=circuit['time']
-    rows.append(row_vals)
-  return render_template('/current.html',data=rows,time=str(max_time))
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0')
+def create_app(database_path: str | None = None) -> Flask:
+  app = Flask(__name__)
+  db = EMonitorDB(database_path or os.getenv("DATABASE_PATH", "db/emonitor.db"))
+
+  @app.route("/")
+  def current():
+    latest_usage = db.load_latest_usage()
+    for row in latest_usage:
+      row["period_start"] = row["period_start"].astimezone()
+      row["period_end"] = row["period_end"].astimezone()
+    latest_time = max((row["period_end"] for row in latest_usage), default=None)
+    return render_template("current.html", data=latest_usage, time=latest_time)
+
+  return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+  app.run(host=os.getenv("WEB_HOST", "127.0.0.1"), port=int(os.getenv("WEB_PORT", "5000")))

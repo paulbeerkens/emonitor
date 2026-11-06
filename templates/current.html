@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
- <title></title>
+ <title>Half-hour energy usage</title>
 </head>
 <body>
 <style>
@@ -13,14 +13,20 @@
         padding: 5px;
       }
 </style>
-<Title>Current usage</Title>
-{{ time }}
+<h1>Half-hour energy usage</h1>
+<p>Latest completed period: {{ time or 'No completed periods recorded yet' }}</p>
 <table>
   <thead>
     <tr>
         <th>ID</th>
         <th>Name</th>
-        <th>Current</th>
+        <th>Energy (Wh)</th>
+        <th>Average power (W)</th>
+        <th>Minimum power (W)</th>
+        <th>Maximum power (W)</th>
+        <th>Measured seconds</th>
+        <th>Samples</th>
+        <th>Coverage</th>
     </tr>
     </thead>
     <tbody>
@@ -28,7 +34,13 @@
             <tr>
                 <td>{{row['id']}}</td>
                 <td>{{row['name']}}</td>
-                <td>{{row['power']}}</td>
+                <td>{{ '%.2f'|format(row['energy_wh']) }}</td>
+                <td>{{ '%.1f'|format(row['average_power_watts']) }}</td>
+                <td>{{row['minimum_power_watts']}}</td>
+                <td>{{row['maximum_power_watts']}}</td>
+                <td>{{ '%.1f'|format(row['measured_seconds']) }}</td>
+                <td>{{row['sample_count']}}</td>
+                <td>{{ '%.1f%%'|format(row['coverage_percent']) }}</td>
             </tr>
         {% endfor %}
     </tbody>

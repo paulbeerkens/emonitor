@@ -1,119 +1,239 @@
-from typing import List, Dict
-import sqlalchemy
-from sqlalchemy import func
-from sqlalchemy import and_
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
-import logging
-
-Base = declarative_base()
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator
 
 
-class MetaData(Base):
-  __tablename__ = 'meta_data'
-  id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
-  name = sqlalchemy.Column(sqlalchemy.String(length=20))
-  input = sqlalchemy.Column(sqlalchemy.Boolean)
-  rating = sqlalchemy.Column(sqlalchemy.Integer)
-  voltage = sqlalchemy.Column(sqlalchemy.Integer)
-  paired = sqlalchemy.Column(sqlalchemy.Integer)
-  def __repr__(self):
-    return f'<meta_data(id={self.id},' \
-           f' name={self.name},' \
-           f' input={self.input},' \
-           f' rating={self.rating}' \
-           f' voltage={self.voltage}' \
-           f' paired={self.paired}' \
-           f'>'
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta_data (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  input INTEGER NOT NULL,
+  rating INTEGER NOT NULL,
+  voltage INTEGER NOT NULL,
+  paired INTEGER NOT NULL
+);
 
-class RawData(Base):
-  __tablename__ = 'raw_data'
-  time = sqlalchemy.Column(sqlalchemy.DateTime, primary_key=True)
-  id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
-  power = sqlalchemy.Column(sqlalchemy.Integer)
+CREATE TABLE IF NOT EXISTS channel_usage (
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  id INTEGER NOT NULL,
+  energy_wh REAL NOT NULL,
+  minimum_power_watts INTEGER NOT NULL,
+  maximum_power_watts INTEGER NOT NULL,
+  average_power_watts REAL NOT NULL,
+  measured_seconds REAL NOT NULL,
+  sample_count INTEGER NOT NULL,
+  coverage_percent REAL NOT NULL,
+  PRIMARY KEY (period_start, id)
+);
 
-  def __repr__(self):
-    return f'<raw_data(time={self.time}, id={self.id}, power={self.power}>'
+CREATE INDEX IF NOT EXISTS channel_usage_id_period
+ON channel_usage (id, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS collector_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  state_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS comed_hourly_prices (
+  hour_start TEXT PRIMARY KEY,
+  price_cents_per_kwh REAL NOT NULL,
+  source_sample_count INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS comed_hourly_prices_hour_start
+ON comed_hourly_prices (hour_start DESC);
+"""
 
 
 class EMonitorDB:
-  def __init__(self):
-    self.logger_ = logging.getLogger('main')
-    self.engine_ = sqlalchemy.create_engine(
-      'mysql+mysqlconnector://writer:writer@localhost:3306/emonitor',
-      echo=False)
-    Base.metadata.create_all(self.engine_)
+  """SQLite storage shared by the collector and web application."""
 
-    Session = sqlalchemy.orm.sessionmaker()
-    Session.configure(bind=self.engine_)
-    self.session_ = Session()
+  def __init__(self, database_path: str | Path = "db/emonitor.db"):
+    self.database_path = Path(database_path).expanduser().resolve()
+    self.database_path.parent.mkdir(parents=True, exist_ok=True)
+    self._initialize()
 
-  def store(self, values: List[Dict[str, str]]):
-    now=datetime.now ()
-    for row in values:
-      id = row.get('#', None)
-      power = row.get('Power (w)', 'NA')
+  @contextmanager
+  def _connect(self) -> Iterator[sqlite3.Connection]:
+    """Open a database connection and always close it after the operation."""
+    connection = sqlite3.connect(self.database_path, timeout=30)
+    connection.row_factory = sqlite3.Row
+    try:
+      with connection:
+        yield connection
+    finally:
+      connection.close()
 
-      db_row = RawData(time=now, id=id, power=power)
-      self.session_.add (db_row)
-    self.session_.commit ()
-    self.logger_.debug (f'Written {len(values)} rows to emonitor.raw_data')
+  def _initialize(self) -> None:
+    with self._connect() as connection:
+      connection.execute("PRAGMA journal_mode=WAL")
+      connection.executescript(SCHEMA)
+      existing_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(channel_usage)")
+      }
+      migrations = {
+        "average_power_watts": "REAL NOT NULL DEFAULT 0",
+        "sample_count": "INTEGER NOT NULL DEFAULT 0",
+        "coverage_percent": "REAL NOT NULL DEFAULT 0",
+      }
+      for column, definition in migrations.items():
+        if column not in existing_columns:
+          connection.execute(
+            f"ALTER TABLE channel_usage ADD COLUMN {column} {definition}"
+          )
+      connection.execute(
+        """
+        UPDATE channel_usage
+        SET average_power_watts = energy_wh * 3600 / measured_seconds,
+            coverage_percent = measured_seconds / 1800 * 100
+        WHERE measured_seconds > 0 AND average_power_watts = 0
+        """
+      )
 
-  def store_meta(self, values: List[Dict[str,str]]):
-    for row in values:
-      id = int (row.get('#', None))
-      name = row.get('Name', 'NA')
-      input = {0: False, 1: True}.get (row.get('Input', 0))
-      rating = int(row.get('CT Rating',0))
-      voltage = int(row.get('Voltage',0))
-      paired = int(row.get('Paired',0))
+  def store_channel_metadata(self, channels: list[dict[str, Any]]) -> None:
+    rows = [
+      (
+        row["channel_id"], row["name"], int(row["is_input"]),
+        row["rating_amps"], row["voltage"], row["paired_channel_id"],
+      )
+      for row in channels
+    ]
+    with self._connect() as connection:
+      connection.executemany(
+        """
+        INSERT INTO meta_data (id, name, input, rating, voltage, paired)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name=excluded.name, input=excluded.input, rating=excluded.rating,
+          voltage=excluded.voltage, paired=excluded.paired
+        """,
+        rows,
+      )
 
-      db_row = MetaData(id=id, name=name, input=input, rating=rating, voltage=voltage, paired=paired )
-      self.session_.merge (db_row)
-    self.session_.commit ()
-    self.logger_.info(f'Updated emonitor.meta_data')
+  def load_channel_metadata(self) -> list[dict[str, Any]]:
+    with self._connect() as connection:
+      rows = connection.execute(
+        "SELECT id, name, input, rating, voltage, paired FROM meta_data ORDER BY id"
+      ).fetchall()
+    return [
+      {
+        "channel_id": row["id"],
+        "name": row["name"],
+        "is_input": bool(row["input"]),
+        "rating_amps": row["rating"],
+        "voltage": row["voltage"],
+        "paired_channel_id": row["paired"],
+      }
+      for row in rows
+    ]
 
-class EMonitorDBReader:
-  def __init__(self):
-    self.logger_ = logging.getLogger('main')
-    self.engine_ = sqlalchemy.create_engine(
-      'mysql+mysqlconnector://reader:reader@localhost:3306/emonitor',
-      echo=True)
-    Base.metadata.create_all(self.engine_)
+  def store_usage_and_checkpoint(
+    self, summaries: list[dict[str, Any]], accumulator_state: dict[str, Any]
+  ) -> None:
+    rows = [
+      (
+        summary["period_start"].isoformat(),
+        summary["period_end"].isoformat(),
+        summary["channel_id"],
+        summary["energy_wh"],
+        summary["minimum_power_watts"],
+        summary["maximum_power_watts"],
+        summary["average_power_watts"],
+        summary["measured_seconds"],
+        summary["sample_count"],
+        summary["coverage_percent"],
+      )
+      for summary in summaries
+    ]
+    with self._connect() as connection:
+      connection.executemany(
+        """
+        INSERT OR REPLACE INTO channel_usage (
+          period_start, period_end, id, energy_wh, minimum_power_watts,
+          maximum_power_watts, average_power_watts, measured_seconds,
+          sample_count, coverage_percent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+      )
+      connection.execute(
+        """
+        INSERT OR REPLACE INTO collector_state (id, state_json, updated_at)
+        VALUES (1, ?, ?)
+        """,
+        (json.dumps(accumulator_state), datetime.now(timezone.utc).isoformat()),
+      )
 
-    Session = sqlalchemy.orm.sessionmaker()
-    Session.configure(bind=self.engine_)
-    self.session_=Session()
-    self.meta_data_={}
-    self._load_meta()
+  def load_accumulator_state(self) -> dict[str, Any] | None:
+    with self._connect() as connection:
+      row = connection.execute(
+        "SELECT state_json FROM collector_state WHERE id = 1"
+      ).fetchone()
+    return json.loads(row["state_json"]) if row else None
 
-  def _load_meta(self):
-    self.session_.commit()
-    for row in self.session_.query(MetaData).all():
-      self.meta_data_ [row.id]={'id': row.id,
-                                'input': row.input,
-                                'name': row.name,
-                                'paired': row.paired,
-                                'rating': row.rating,
-                                'voltage': row.voltage,
-                                }
+  def load_latest_usage(self) -> list[dict[str, Any]]:
+    with self._connect() as connection:
+      rows = connection.execute(
+        """
+        SELECT u.id, COALESCE(m.name, 'NA') AS name, u.period_start,
+               u.period_end, u.energy_wh, u.minimum_power_watts,
+               u.maximum_power_watts, u.average_power_watts,
+               u.measured_seconds, u.sample_count, u.coverage_percent
+        FROM channel_usage AS u
+        LEFT JOIN meta_data AS m ON m.id = u.id
+        INNER JOIN (
+          SELECT id, MAX(period_end) AS latest_period_end
+          FROM channel_usage GROUP BY id
+        ) AS latest
+          ON latest.id = u.id AND latest.latest_period_end = u.period_end
+        ORDER BY u.id
+        """
+      ).fetchall()
 
-  def load_latest(self):
-    #https://docs.sqlalchemy.org/en/14/faq/sessions.html#i-m-re-loading-data-with-my-session-but-it-isn-t-seeing-changes-that-i-committed-elsewhere
-    self.session_.commit()
+    result = []
+    for row in rows:
+      item = dict(row)
+      item["period_start"] = datetime.fromisoformat(item["period_start"])
+      item["period_end"] = datetime.fromisoformat(item["period_end"])
+      result.append(item)
+    return result
 
-    max_query=self.session_.query(RawData.id,func.max(RawData.time).label('max_timestamp')).group_by (RawData.id).subquery()
-    query2=self.session_.query(RawData).join(max_query, and_(RawData.id == max_query.c.id, RawData.time == max_query.c.max_timestamp))
-    #query3=self.session_.query(query2.c.id, query2.c.power,MetaData).filter(query2.c.id == MetaData.id)
+  def store_comed_hourly_prices(self, prices: list[dict[str, Any]]) -> None:
+    updated_at = datetime.now(timezone.utc).isoformat()
+    rows = [
+      (
+        price["hour_start"].astimezone(timezone.utc).isoformat(),
+        price["price_cents_per_kwh"],
+        price["source_sample_count"],
+        updated_at,
+      )
+      for price in prices
+    ]
+    with self._connect() as connection:
+      connection.executemany(
+        """
+        INSERT INTO comed_hourly_prices (
+          hour_start, price_cents_per_kwh, source_sample_count, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(hour_start) DO UPDATE SET
+          price_cents_per_kwh=excluded.price_cents_per_kwh,
+          source_sample_count=excluded.source_sample_count,
+          updated_at=excluded.updated_at
+        """,
+        rows,
+      )
 
-    ret_val=[]
-    for row in query2.all ():
-      id=row.id
-      power=row.power
-      time=row.time
-      ret_dict=self.meta_data_.get (id,{})
-      ret_dict ['power']=power
-      ret_dict ['time']=time
-      ret_val.append(ret_dict)
-    return ret_val
+  def load_last_comed_price_update(self) -> datetime | None:
+    with self._connect() as connection:
+      row = connection.execute(
+        "SELECT MAX(updated_at) AS updated_at FROM comed_hourly_prices"
+      ).fetchone()
+    return datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None
 
+EMonitorDBReader = EMonitorDB

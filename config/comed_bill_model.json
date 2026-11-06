@@ -1,0 +1,36 @@
+{
+  "source": "ComEd bill issued 2026-10-13",
+  "service_period": "2026-09-10 through 2026-10-12",
+  "billing_days": 32,
+  "import_kwh": 911,
+  "market_supply_charge_dollars": 56.43,
+  "variable_import_charges_dollars": {
+    "transmission_services": 9.79,
+    "purchased_electricity_adjustment": -20.92,
+    "misc_procurement": 2.06,
+    "distribution_facility": 57.76,
+    "illinois_distribution": 1.17,
+    "environmental_recovery": 0.06,
+    "energy_efficiency": 3.36,
+    "renewable_portfolio": 4.70,
+    "coal_to_solar": 0.07,
+    "zero_emission": 0.63,
+    "carbon_free_adjustment": -1.05,
+    "energy_transition": 0.77,
+    "franchise_cost": 4.48,
+    "state_tax": 2.79,
+    "municipal_tax": 5.31
+  },
+  "fixed_charges_dollars": {
+    "capacity": 4.95,
+    "customer": 15.52,
+    "standard_metering": 3.88,
+    "low_income_recovery": 1.35
+  },
+  "export_adjustments_dollars": {
+    "hourly_pricing_credit": -2.00,
+    "supply_adjustment": 0.66,
+    "delivery_credit": -4.27,
+    "net_metering_adjustment": -0.62
+  }
+}
