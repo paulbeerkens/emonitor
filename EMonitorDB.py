@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS channel_usage (
 
 CREATE INDEX IF NOT EXISTS channel_usage_id_period
 ON channel_usage (id, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS power_samples (
+  sampled_at_ms INTEGER NOT NULL,
+  id INTEGER NOT NULL,
+  power_watts INTEGER NOT NULL,
+  PRIMARY KEY (sampled_at_ms, id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS power_samples_id_time
+ON power_samples (id, sampled_at_ms);
 
 CREATE TABLE IF NOT EXISTS collector_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -134,8 +144,20 @@ class EMonitorDB:
     ]
 
   def store_usage_and_checkpoint(
-    self, summaries: list[dict[str, Any]], accumulator_state: dict[str, Any]
+    self,
+    summaries: list[dict[str, Any]],
+    accumulator_state: dict[str, Any],
+    *,
+    sampled_at: datetime | None = None,
+    readings: list[dict[str, Any]] | None = None,
+    sample_retention_days: int = 7,
+    prune_samples: bool = False,
   ) -> None:
+    if (sampled_at is None) != (readings is None):
+      raise ValueError("sampled_at and readings must be provided together")
+    if sample_retention_days <= 0:
+      raise ValueError("sample_retention_days must be greater than zero")
+
     rows = [
       (
         summary["period_start"].isoformat(),
@@ -152,6 +174,30 @@ class EMonitorDB:
       for summary in summaries
     ]
     with self._connect() as connection:
+      if sampled_at is not None and readings is not None:
+        if sampled_at.tzinfo is None:
+          raise ValueError("sampled_at must include a timezone")
+        sampled_at_utc = sampled_at.astimezone(timezone.utc)
+        sampled_at_ms = round(sampled_at_utc.timestamp() * 1000)
+        connection.executemany(
+          """
+          INSERT OR REPLACE INTO power_samples (
+            sampled_at_ms, id, power_watts
+          ) VALUES (?, ?, ?)
+          """,
+          [
+            (sampled_at_ms, reading["channel_id"], reading["power_watts"])
+            for reading in readings
+          ],
+        )
+        if prune_samples:
+          retention_cutoff = sampled_at_utc - timedelta(days=sample_retention_days)
+          retention_cutoff_ms = round(retention_cutoff.timestamp() * 1000)
+          connection.execute(
+            "DELETE FROM power_samples WHERE sampled_at_ms < ?",
+            (retention_cutoff_ms,),
+          )
+
       connection.executemany(
         """
         INSERT OR REPLACE INTO channel_usage (
@@ -169,6 +215,53 @@ class EMonitorDB:
         """,
         (json.dumps(accumulator_state), datetime.now(timezone.utc).isoformat()),
       )
+
+  def load_power_samples(
+    self,
+    start: datetime,
+    end: datetime,
+    channel_ids: list[int] | None = None,
+  ) -> list[dict[str, Any]]:
+    """Load detailed power readings for short-horizon graphs."""
+    if start.tzinfo is None or end.tzinfo is None:
+      raise ValueError("start and end must include a timezone")
+    if end <= start:
+      raise ValueError("end must be later than start")
+
+    start_ms = round(start.astimezone(timezone.utc).timestamp() * 1000)
+    end_ms = round(end.astimezone(timezone.utc).timestamp() * 1000)
+    parameters: list[Any] = [start_ms, end_ms]
+    channel_filter = ""
+    if channel_ids:
+      placeholders = ", ".join("?" for _ in channel_ids)
+      channel_filter = f" AND s.id IN ({placeholders})"
+      parameters.extend(channel_ids)
+
+    with self._connect() as connection:
+      rows = connection.execute(
+        f"""
+        SELECT s.sampled_at_ms, s.id, COALESCE(m.name, 'NA') AS name,
+               s.power_watts
+        FROM power_samples AS s
+        LEFT JOIN meta_data AS m ON m.id = s.id
+        WHERE s.sampled_at_ms >= ? AND s.sampled_at_ms < ?
+        {channel_filter}
+        ORDER BY s.sampled_at_ms, s.id
+        """,
+        parameters,
+      ).fetchall()
+
+    return [
+      {
+        "sampled_at": datetime.fromtimestamp(
+          row["sampled_at_ms"] / 1000, timezone.utc
+        ),
+        "channel_id": row["id"],
+        "channel_name": row["name"],
+        "power_watts": row["power_watts"],
+      }
+      for row in rows
+    ]
 
   def load_accumulator_state(self) -> dict[str, Any] | None:
     with self._connect() as connection:

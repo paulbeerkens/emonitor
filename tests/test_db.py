@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -80,3 +80,63 @@ def test_store_comed_hourly_prices_upserts_existing_hour(tmp_path):
   assert row["price_cents_per_kwh"] == 4.25
   assert row["source_sample_count"] == 11
   assert db.load_last_comed_price_update() is not None
+
+
+def test_stores_and_prunes_detailed_power_samples(tmp_path):
+  db = EMonitorDB(tmp_path / "emonitor.db")
+  db.store_channel_metadata([
+    {
+      "channel_id": 1, "name": "Kitchen", "is_input": False,
+      "rating_amps": 20, "voltage": 120, "paired_channel_id": 0,
+    },
+    {
+      "channel_id": 2, "name": "Living Room", "is_input": False,
+      "rating_amps": 20, "voltage": 120, "paired_channel_id": 0,
+    },
+  ])
+  old_time = datetime.fromisoformat("2026-10-01T12:00:00+00:00")
+  recent_time = datetime.fromisoformat("2026-10-09T12:00:00+00:00")
+
+  db.store_usage_and_checkpoint(
+    [], {}, sampled_at=old_time,
+    readings=[{"channel_id": 1, "power_watts": 100}],
+  )
+  db.store_usage_and_checkpoint(
+    [], {}, sampled_at=recent_time,
+    readings=[
+      {"channel_id": 1, "power_watts": 250},
+      {"channel_id": 2, "power_watts": 75},
+    ],
+  )
+
+  with db._connect() as connection:
+    assert connection.execute("SELECT COUNT(*) FROM power_samples").fetchone()[0] == 3
+
+  db.store_usage_and_checkpoint(
+    [], {}, sampled_at=recent_time + timedelta(seconds=15),
+    readings=[{"channel_id": 1, "power_watts": 275}],
+    prune_samples=True,
+  )
+
+  samples = db.load_power_samples(
+    recent_time - timedelta(minutes=1),
+    recent_time + timedelta(minutes=1),
+    channel_ids=[1],
+  )
+  assert samples == [
+    {
+      "sampled_at": recent_time,
+      "channel_id": 1,
+      "channel_name": "Kitchen",
+      "power_watts": 250,
+    },
+    {
+      "sampled_at": recent_time + timedelta(seconds=15),
+      "channel_id": 1,
+      "channel_name": "Kitchen",
+      "power_watts": 275,
+    },
+  ]
+
+  with db._connect() as connection:
+    assert connection.execute("SELECT COUNT(*) FROM power_samples").fetchone()[0] == 3

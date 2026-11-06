@@ -55,6 +55,9 @@ class EMonitor:
     )
     self.logger = logging.getLogger("emonitor")
     self.poll_interval = float(os.getenv("POLL_INTERVAL_SECONDS", "15"))
+    self.sample_retention_days = int(os.getenv("SAMPLE_RETENTION_DAYS", "7"))
+    if self.sample_retention_days <= 0:
+      raise ValueError("SAMPLE_RETENTION_DAYS must be greater than zero")
     self.write_interval = int(os.getenv("WRITE_INTERVAL_MINUTES", "30"))
     self.maximum_gap = float(os.getenv("MAX_SAMPLE_GAP_SECONDS", "60"))
     self.monitor_timeout = float(os.getenv("MONITOR_TIMEOUT_SECONDS", "10"))
@@ -95,7 +98,12 @@ class EMonitor:
       await self.page.close()
 
   async def _run_collector(self) -> None:
-    self.logger.info("Starting collector; polling every %.1fs", self.poll_interval)
+    self.logger.info(
+      "Starting collector; polling every %.1fs; retaining detailed samples "
+      "for %d days",
+      self.poll_interval,
+      self.sample_retention_days,
+    )
     await self._refresh_comed_prices()
     try:
       channel_metadata = await self.page.get_channel_metadata()
@@ -156,7 +164,12 @@ class EMonitor:
             current_readings, sampled_at
           )
           self.db.store_usage_and_checkpoint(
-            completed_summaries, self.energy_accumulator.export_state()
+            completed_summaries,
+            self.energy_accumulator.export_state(),
+            sampled_at=sampled_at,
+            readings=current_readings,
+            sample_retention_days=self.sample_retention_days,
+            prune_samples=bool(completed_summaries),
           )
           if completed_summaries:
             self.logger.info(

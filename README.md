@@ -4,8 +4,9 @@ EMonitor polls an energy monitor's HTML status page at a configurable interval.
 It integrates the sampled power into clock-aligned half-hour energy totals and
 stores each channel's watt-hours, average watts, minimum watts, maximum watts,
 sample count, and measurement coverage in SQLite. Paired monitor channels are
-combined into one logical circuit before accumulation. A small Flask application
-displays the newest completed period for every circuit.
+combined into one logical circuit before accumulation. Individual logical-channel
+power samples are retained for seven days for detailed short-horizon graphs. A
+small Flask application displays the newest completed period for every circuit.
 
 Once per local calendar day, the collector also downloads ComEd's 5-minute price
 feed, averages those samples into hourly prices, and upserts them into the
@@ -67,7 +68,10 @@ Transient monitor timeouts are logged as one-line warnings without a traceback;
 Intervals longer than `MAX_SAMPLE_GAP_SECONDS` are treated as missing data and
 do not contribute estimated energy. The coverage percentage exposes incomplete
 periods. In-progress accumulation is checkpointed in SQLite after every poll so
-a restart can resume without discarding the current period.
+a restart can resume without discarding the current period. Detailed readings
+are stored in `power_samples`; `SAMPLE_RETENTION_DAYS` controls their rolling
+retention window and defaults to seven days. Expired detailed samples are
+removed when a half-hour period closes.
 
 ## Test
 
