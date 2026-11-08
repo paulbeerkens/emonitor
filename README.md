@@ -8,8 +8,11 @@ combined into one logical circuit before accumulation. Individual logical-channe
 power samples are retained for seven days for detailed short-horizon graphs. A
 small Flask application displays the newest completed period for every circuit.
 
-Every five minutes, the collector downloads an overlapping 48-hour window from
-ComEd's 5-minute price feed. Unique samples are upserted into
+The collector downloads an overlapping 48-hour window from ComEd's 5-minute
+price feed. On startup it checks every 30 seconds until it observes a new ComEd
+timestamp, then follows that publication phase at five-minute intervals. If an
+expected update is absent or a request fails, it returns to 30-second checks
+until it is synchronized again. Unique samples are upserted into
 `comed_price_samples`, then affected 30-minute averages are rebuilt in
 `comed_half_hour_prices`. The overlap makes restarts and short outages safe;
 legacy hourly prices remain available for older historical cost estimates.

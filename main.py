@@ -215,9 +215,11 @@ class EMonitor:
       if result is not None:
         self.logger.info(
           "Stored or refreshed %d ComEd five-minute samples across %d "
-          "half-hour price periods",
+          "half-hour price periods; next check in %d seconds%s",
           result["samples"],
           result["half_hours"],
+          result["next_refresh_seconds"],
+          " (calibrating)" if not result["latest_changed"] else "",
         )
     except Exception:
       self.logger.exception("Could not update ComEd prices; continuing")
