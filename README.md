@@ -8,10 +8,11 @@ combined into one logical circuit before accumulation. Individual logical-channe
 power samples are retained for seven days for detailed short-horizon graphs. A
 small Flask application displays the newest completed period for every circuit.
 
-Once per local calendar day, the collector also downloads ComEd's 5-minute price
-feed, averages those samples into hourly prices, and upserts them into the
-`comed_hourly_prices` SQLite table. It refreshes the previous day as well as the
-current day so preliminary prices can be updated.
+Every five minutes, the collector downloads an overlapping 48-hour window from
+ComEd's 5-minute price feed. Unique samples are upserted into
+`comed_price_samples`, then affected 30-minute averages are rebuilt in
+`comed_half_hour_prices`. The overlap makes restarts and short outages safe;
+legacy hourly prices remain available for older historical cost estimates.
 
 ## Setup (Python 3.13)
 

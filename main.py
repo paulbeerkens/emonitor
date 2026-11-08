@@ -211,11 +211,16 @@ class EMonitor:
 
   async def _refresh_comed_prices(self) -> None:
     try:
-      updated_hours = await asyncio.to_thread(self.comed_prices.refresh_if_due)
-      if updated_hours is not None:
-        self.logger.info("Stored %d hourly ComEd prices", updated_hours)
+      result = await asyncio.to_thread(self.comed_prices.refresh_if_due)
+      if result is not None:
+        self.logger.info(
+          "Stored or refreshed %d ComEd five-minute samples across %d "
+          "half-hour price periods",
+          result["samples"],
+          result["half_hours"],
+        )
     except Exception:
-      self.logger.exception("Could not update ComEd hourly prices; continuing")
+      self.logger.exception("Could not update ComEd prices; continuing")
 
 
 if __name__ == "__main__":

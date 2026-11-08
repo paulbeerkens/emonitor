@@ -1,8 +1,7 @@
 import json
 import urllib.parse
 import urllib.request
-from collections import defaultdict
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,35 +11,38 @@ CHICAGO = ZoneInfo("America/Chicago")
 
 
 class ComEdPriceUpdater:
-  """Download ComEd's 5-minute feed and store one average per hour."""
+  """Persist ComEd's five-minute feed and restart-safe half-hour averages."""
 
-  def __init__(self, database, api_url: str = COMED_API_URL):
+  def __init__(
+    self,
+    database,
+    api_url: str = COMED_API_URL,
+    refresh_seconds: int = 300,
+    recovery_hours: int = 48,
+  ):
     self.database = database
     self.api_url = api_url
-    self._last_attempt_date = None
+    self.refresh_seconds = refresh_seconds
+    self.recovery_hours = recovery_hours
+    self._last_attempt: datetime | None = None
 
-  def refresh_if_due(self, now: datetime | None = None) -> int | None:
+  def refresh_if_due(self, now: datetime | None = None) -> dict[str, int] | None:
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
       raise ValueError("now must include a timezone")
 
+    if (
+      self._last_attempt is not None
+      and (now - self._last_attempt).total_seconds() < self.refresh_seconds
+    ):
+      return None
+    self._last_attempt = now
     local_now = now.astimezone(CHICAGO)
-    if self._last_attempt_date == local_now.date():
-      return None
-    self._last_attempt_date = local_now.date()
-    last_update = self.database.load_last_comed_price_update()
-    if last_update and last_update.astimezone(CHICAGO).date() == local_now.date():
-      return None
-
-    start_local = datetime.combine(
-      local_now.date() - timedelta(days=1), time.min, CHICAGO
-    )
+    start_local = local_now - timedelta(hours=self.recovery_hours)
     samples = self._download_samples(start_local, local_now)
-    hourly_prices = self._average_by_hour(samples)
-    if not hourly_prices:
+    if not samples:
       raise RuntimeError("ComEd returned no price data")
-    self.database.store_comed_hourly_prices(hourly_prices)
-    return len(hourly_prices)
+    return self.database.store_comed_price_samples(samples, retrieved_at=now)
 
   def _download_samples(
     self, start_local: datetime, end_local: datetime
@@ -59,23 +61,4 @@ class ComEdPriceUpdater:
         float(item["price"]),
       )
       for item in payload
-    ]
-
-  @staticmethod
-  def _average_by_hour(
-    samples: list[tuple[datetime, float]],
-  ) -> list[dict[str, Any]]:
-    grouped: dict[datetime, list[float]] = defaultdict(list)
-    for sampled_at, price in samples:
-      hour_start = sampled_at.astimezone(timezone.utc).replace(
-        minute=0, second=0, microsecond=0
-      )
-      grouped[hour_start].append(price)
-    return [
-      {
-        "hour_start": hour_start,
-        "price_cents_per_kwh": sum(values) / len(values),
-        "source_sample_count": len(values),
-      }
-      for hour_start, values in sorted(grouped.items())
     ]

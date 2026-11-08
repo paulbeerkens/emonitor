@@ -58,6 +58,25 @@ CREATE TABLE IF NOT EXISTS comed_hourly_prices (
 
 CREATE INDEX IF NOT EXISTS comed_hourly_prices_hour_start
 ON comed_hourly_prices (hour_start DESC);
+
+CREATE TABLE IF NOT EXISTS comed_price_samples (
+  sampled_at_ms INTEGER PRIMARY KEY,
+  price_cents_per_kwh REAL NOT NULL,
+  retrieved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS comed_half_hour_prices (
+  period_start TEXT PRIMARY KEY,
+  period_end TEXT NOT NULL,
+  price_sum_cents_per_kwh REAL NOT NULL,
+  sample_count INTEGER NOT NULL,
+  average_price_cents_per_kwh REAL NOT NULL,
+  is_complete INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS comed_half_hour_prices_start
+ON comed_half_hour_prices (period_start DESC);
 """
 
 
@@ -328,5 +347,89 @@ class EMonitorDB:
         "SELECT MAX(updated_at) AS updated_at FROM comed_hourly_prices"
       ).fetchone()
     return datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None
+
+  def store_comed_price_samples(
+    self,
+    samples: list[tuple[datetime, float]],
+    *,
+    retrieved_at: datetime | None = None,
+  ) -> dict[str, int]:
+    """Upsert five-minute prices and rebuild their half-hour buckets."""
+    if not samples:
+      return {"samples": 0, "half_hours": 0}
+    retrieved_at = retrieved_at or datetime.now(timezone.utc)
+    if retrieved_at.tzinfo is None:
+      raise ValueError("retrieved_at must include a timezone")
+
+    normalized: dict[int, float] = {}
+    affected_periods: set[int] = set()
+    for sampled_at, price in samples:
+      if sampled_at.tzinfo is None:
+        raise ValueError("ComEd sample timestamps must include a timezone")
+      sampled_at_ms = round(sampled_at.astimezone(timezone.utc).timestamp() * 1000)
+      normalized[sampled_at_ms] = float(price)
+      affected_periods.add(sampled_at_ms - sampled_at_ms % (30 * 60 * 1000))
+
+    retrieved_text = retrieved_at.astimezone(timezone.utc).isoformat()
+    with self._connect() as connection:
+      connection.executemany(
+        """
+        INSERT INTO comed_price_samples (
+          sampled_at_ms, price_cents_per_kwh, retrieved_at
+        ) VALUES (?, ?, ?)
+        ON CONFLICT(sampled_at_ms) DO UPDATE SET
+          price_cents_per_kwh=excluded.price_cents_per_kwh,
+          retrieved_at=excluded.retrieved_at
+        """,
+        [
+          (sampled_at_ms, price, retrieved_text)
+          for sampled_at_ms, price in normalized.items()
+        ],
+      )
+
+      for period_start_ms in affected_periods:
+        period_end_ms = period_start_ms + 30 * 60 * 1000
+        aggregate = connection.execute(
+          """
+          SELECT SUM(price_cents_per_kwh) AS price_sum,
+                 COUNT(*) AS sample_count,
+                 MAX(sampled_at_ms) AS latest_sample_ms
+          FROM comed_price_samples
+          WHERE sampled_at_ms >= ? AND sampled_at_ms < ?
+          """,
+          (period_start_ms, period_end_ms),
+        ).fetchone()
+        sample_count = int(aggregate["sample_count"])
+        price_sum = float(aggregate["price_sum"])
+        period_start = datetime.fromtimestamp(
+          period_start_ms / 1000, timezone.utc
+        )
+        period_end = datetime.fromtimestamp(period_end_ms / 1000, timezone.utc)
+        is_complete = (
+          sample_count >= 6
+          and int(aggregate["latest_sample_ms"]) >= period_end_ms - 5 * 60 * 1000
+        )
+        connection.execute(
+          """
+          INSERT INTO comed_half_hour_prices (
+            period_start, period_end, price_sum_cents_per_kwh, sample_count,
+            average_price_cents_per_kwh, is_complete, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(period_start) DO UPDATE SET
+            period_end=excluded.period_end,
+            price_sum_cents_per_kwh=excluded.price_sum_cents_per_kwh,
+            sample_count=excluded.sample_count,
+            average_price_cents_per_kwh=excluded.average_price_cents_per_kwh,
+            is_complete=excluded.is_complete,
+            updated_at=excluded.updated_at
+          """,
+          (
+            period_start.isoformat(), period_end.isoformat(), price_sum,
+            sample_count, price_sum / sample_count, int(is_complete),
+            retrieved_text,
+          ),
+        )
+
+    return {"samples": len(normalized), "half_hours": len(affected_periods)}
 
 EMonitorDBReader = EMonitorDB

@@ -82,6 +82,37 @@ def test_store_comed_hourly_prices_upserts_existing_hour(tmp_path):
   assert db.load_last_comed_price_update() is not None
 
 
+def test_comed_samples_are_restart_safe_and_rebuild_half_hours(tmp_path):
+  db = EMonitorDB(tmp_path / "emonitor.db")
+  start = datetime(2026, 10, 25, 14, 0, tzinfo=timezone.utc)
+  first = [(start + timedelta(minutes=offset), 2.0 + offset / 10)
+           for offset in (0, 5, 10, 15)]
+  complete = [(start + timedelta(minutes=offset), 2.0 + offset / 10)
+              for offset in (0, 5, 10, 15, 20, 25)]
+
+  db.store_comed_price_samples(first, retrieved_at=start + timedelta(minutes=16))
+  db.store_comed_price_samples(
+    complete, retrieved_at=start + timedelta(minutes=31)
+  )
+
+  with db._connect() as connection:
+    assert connection.execute(
+      "SELECT COUNT(*) FROM comed_price_samples"
+    ).fetchone()[0] == 6
+    row = connection.execute(
+      "SELECT * FROM comed_half_hour_prices"
+    ).fetchone()
+
+  assert row["sample_count"] == 6
+  assert row["price_sum_cents_per_kwh"] == pytest.approx(
+    sum(price for _, price in complete)
+  )
+  assert row["average_price_cents_per_kwh"] == pytest.approx(
+    sum(price for _, price in complete) / 6
+  )
+  assert row["is_complete"] == 1
+
+
 def test_stores_and_prunes_detailed_power_samples(tmp_path):
   db = EMonitorDB(tmp_path / "emonitor.db")
   db.store_channel_metadata([
